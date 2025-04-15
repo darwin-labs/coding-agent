@@ -394,6 +394,378 @@ class CodingAgent: ObservableObject {
         return TaskPlan(title: plan.title, steps: allSteps, currentStepIndex: index)
     }
     
+    // MARK: - Code Execution
+    
+    /// Executes code in various languages
+    /// - Parameters:
+    ///   - code: The code to execute
+    ///   - language: The programming language of the code
+    ///   - timeout: Maximum execution time in seconds (default: 30)
+    /// - Returns: The execution result with output, errors, and status
+    func executeCode(code: String, language: CodeLanguage, timeout: Int = 30) async throws -> CodeExecutionResult {
+        logger.log("Executing \(language.rawValue) code (timeout: \(timeout)s)")
+        
+        switch language {
+        case .swift:
+            return try await executeSwiftCode(code: code, timeout: timeout)
+        case .shell:
+            return try await executeShellCommand(command: code, timeout: timeout)
+        case .python:
+            return try await executePythonCode(code: code, timeout: timeout)
+        case .javascript:
+            return try await executeJavaScriptCode(code: code, timeout: timeout)
+        case .ruby:
+            return try await executeRubyCode(code: code, timeout: timeout)
+        }
+    }
+    
+    /// Executes Swift code using a temporary file and subprocess
+    private func executeSwiftCode(code: String, timeout: Int) async throws -> CodeExecutionResult {
+        // Create a temporary directory for the code
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempFile = tempDir.appendingPathComponent("code.swift")
+        
+        logger.log("Created temporary Swift file at: \(tempFile.path)")
+        
+        // Write the code to a temporary file
+        try code.write(to: tempFile, atomically: true, encoding: .utf8)
+        
+        // Execute the Swift code
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
+        process.arguments = [tempFile.path]
+        
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        
+        // Create a timeout task
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
+            if process.isRunning {
+                logger.log("Swift code execution timed out after \(timeout) seconds")
+                process.terminate()
+                return true
+            }
+            return false
+        }
+        
+        logger.log("Starting Swift code execution")
+        try process.run()
+        
+        // Wait for process to complete or timeout
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .background).async {
+                process.waitUntilExit()
+                
+                // Cancel the timeout task
+                timeoutTask.cancel()
+                
+                // Get output and error
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                let error = String(data: errorData, encoding: .utf8) ?? ""
+                
+                let exitCode = process.terminationStatus
+                let wasTimedOut = process.terminationReason == .uncaughtSignal
+                
+                // Clean up
+                try? FileManager.default.removeItem(at: tempDir)
+                
+                let success = exitCode == 0 && !wasTimedOut
+                self.logger.log("Swift code execution \(success ? "succeeded" : "failed") with exit code \(exitCode)")
+                
+                let result = CodeExecutionResult(
+                    success: success,
+                    output: output,
+                    error: error,
+                    exitCode: Int(exitCode),
+                    timedOut: wasTimedOut
+                )
+                
+                continuation.resume(returning: result)
+            }
+        }
+    }
+    
+    /// Executes a shell command
+    private func executeShellCommand(command: String, timeout: Int) async throws -> CodeExecutionResult {
+        // Create a process to run the shell command
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", command]
+        
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        
+        // Create a timeout task
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
+            if process.isRunning {
+                logger.log("Shell command execution timed out after \(timeout) seconds")
+                process.terminate()
+                return true
+            }
+            return false
+        }
+        
+        logger.log("Executing shell command: \(command)")
+        try process.run()
+        
+        // Wait for process to complete or timeout
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .background).async {
+                process.waitUntilExit()
+                
+                // Cancel the timeout task
+                timeoutTask.cancel()
+                
+                // Get output and error
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                let error = String(data: errorData, encoding: .utf8) ?? ""
+                
+                let exitCode = process.terminationStatus
+                let wasTimedOut = process.terminationReason == .uncaughtSignal
+                
+                let success = exitCode == 0 && !wasTimedOut
+                self.logger.log("Shell command execution \(success ? "succeeded" : "failed") with exit code \(exitCode)")
+                
+                let result = CodeExecutionResult(
+                    success: success,
+                    output: output,
+                    error: error,
+                    exitCode: Int(exitCode),
+                    timedOut: wasTimedOut
+                )
+                
+                continuation.resume(returning: result)
+            }
+        }
+    }
+    
+    /// Executes Python code using a temporary file and subprocess
+    private func executePythonCode(code: String, timeout: Int) async throws -> CodeExecutionResult {
+        // Create a temporary directory for the code
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempFile = tempDir.appendingPathComponent("code.py")
+        
+        logger.log("Created temporary Python file at: \(tempFile.path)")
+        
+        // Write the code to a temporary file
+        try code.write(to: tempFile, atomically: true, encoding: .utf8)
+        
+        // Execute the Python code
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [tempFile.path]
+        
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        
+        // Create a timeout task
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
+            if process.isRunning {
+                logger.log("Python code execution timed out after \(timeout) seconds")
+                process.terminate()
+                return true
+            }
+            return false
+        }
+        
+        logger.log("Starting Python code execution")
+        try process.run()
+        
+        // Wait for process to complete or timeout
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .background).async {
+                process.waitUntilExit()
+                
+                // Cancel the timeout task
+                timeoutTask.cancel()
+                
+                // Get output and error
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                let error = String(data: errorData, encoding: .utf8) ?? ""
+                
+                let exitCode = process.terminationStatus
+                let wasTimedOut = process.terminationReason == .uncaughtSignal
+                
+                // Clean up
+                try? FileManager.default.removeItem(at: tempDir)
+                
+                let success = exitCode == 0 && !wasTimedOut
+                self.logger.log("Python code execution \(success ? "succeeded" : "failed") with exit code \(exitCode)")
+                
+                let result = CodeExecutionResult(
+                    success: success,
+                    output: output,
+                    error: error,
+                    exitCode: Int(exitCode),
+                    timedOut: wasTimedOut
+                )
+                
+                continuation.resume(returning: result)
+            }
+        }
+    }
+    
+    /// Executes JavaScript code using Node.js
+    private func executeJavaScriptCode(code: String, timeout: Int) async throws -> CodeExecutionResult {
+        // Create a temporary directory for the code
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempFile = tempDir.appendingPathComponent("code.js")
+        
+        logger.log("Created temporary JavaScript file at: \(tempFile.path)")
+        
+        // Write the code to a temporary file
+        try code.write(to: tempFile, atomically: true, encoding: .utf8)
+        
+        // Execute the JavaScript code with Node.js
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/node")
+        process.arguments = [tempFile.path]
+        
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        
+        // Create a timeout task
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
+            if process.isRunning {
+                logger.log("JavaScript code execution timed out after \(timeout) seconds")
+                process.terminate()
+                return true
+            }
+            return false
+        }
+        
+        logger.log("Starting JavaScript code execution")
+        try process.run()
+        
+        // Wait for process to complete or timeout
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .background).async {
+                process.waitUntilExit()
+                
+                // Cancel the timeout task
+                timeoutTask.cancel()
+                
+                // Get output and error
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                let error = String(data: errorData, encoding: .utf8) ?? ""
+                
+                let exitCode = process.terminationStatus
+                let wasTimedOut = process.terminationReason == .uncaughtSignal
+                
+                // Clean up
+                try? FileManager.default.removeItem(at: tempDir)
+                
+                let success = exitCode == 0 && !wasTimedOut
+                self.logger.log("JavaScript code execution \(success ? "succeeded" : "failed") with exit code \(exitCode)")
+                
+                let result = CodeExecutionResult(
+                    success: success,
+                    output: output,
+                    error: error,
+                    exitCode: Int(exitCode),
+                    timedOut: wasTimedOut
+                )
+                
+                continuation.resume(returning: result)
+            }
+        }
+    }
+    
+    /// Executes Ruby code
+    private func executeRubyCode(code: String, timeout: Int) async throws -> CodeExecutionResult {
+        // Create a temporary directory for the code
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempFile = tempDir.appendingPathComponent("code.rb")
+        
+        logger.log("Created temporary Ruby file at: \(tempFile.path)")
+        
+        // Write the code to a temporary file
+        try code.write(to: tempFile, atomically: true, encoding: .utf8)
+        
+        // Execute the Ruby code
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ruby")
+        process.arguments = [tempFile.path]
+        
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        
+        // Create a timeout task
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout) * 1_000_000_000)
+            if process.isRunning {
+                logger.log("Ruby code execution timed out after \(timeout) seconds")
+                process.terminate()
+                return true
+            }
+            return false
+        }
+        
+        logger.log("Starting Ruby code execution")
+        try process.run()
+        
+        // Wait for process to complete or timeout
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .background).async {
+                process.waitUntilExit()
+                
+                // Cancel the timeout task
+                timeoutTask.cancel()
+                
+                // Get output and error
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                let error = String(data: errorData, encoding: .utf8) ?? ""
+                
+                let exitCode = process.terminationStatus
+                let wasTimedOut = process.terminationReason == .uncaughtSignal
+                
+                // Clean up
+                try? FileManager.default.removeItem(at: tempDir)
+                
+                let success = exitCode == 0 && !wasTimedOut
+                self.logger.log("Ruby code execution \(success ? "succeeded" : "failed") with exit code \(exitCode)")
+                
+                let result = CodeExecutionResult(
+                    success: success,
+                    output: output,
+                    error: error,
+                    exitCode: Int(exitCode),
+                    timedOut: wasTimedOut
+                )
+                
+                continuation.resume(returning: result)
+            }
+        }
+    }
+    
     // MARK: - File Operations
     
     /// Reads the content of a file
@@ -996,4 +1368,26 @@ class FeedbackGenerator: ObservableObject {
       // Return up to numQuestions follow-up questions.
       return Array(feedback.questions.prefix(numQuestions))
   }
+}
+
+// MARK: - CodeLanguage Enum
+
+/// Supported programming languages for code execution
+enum CodeLanguage: String, Codable {
+    case swift = "Swift"
+    case shell = "Shell"
+    case python = "Python"
+    case javascript = "JavaScript"
+    case ruby = "Ruby"
+}
+
+// MARK: - CodeExecutionResult Struct
+
+/// Represents the result of executing code
+struct CodeExecutionResult: Codable {
+    let success: Bool
+    let output: String
+    let error: String
+    let exitCode: Int
+    let timedOut: Bool
 } 
